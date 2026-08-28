@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    # master is covered by the run that release.yml calls before it tags, so pushing
+    # there does not need a second one
+    branches-ignore: [master]
+  workflow_call:
+
+# A branch that is pushed again supersedes its own in-flight run, but master is left
+# alone: its run gates the release.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Tool versions
+        id: tools
+        run: |
+          echo "golangci=$(make -s print-GOLANGCI_VERSION)" >> "$GITHUB_OUTPUT"
+          echo "actionlint=$(make -s print-ACTIONLINT_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ steps.tools.outputs.golangci }}
+
+      # the other half of `make lint`, so CI is never weaker than the local target
+      - name: Lint the workflows
+        env:
+          ACTIONLINT_VERSION: ${{ steps.tools.outputs.actionlint }}
+        run: |
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          "$(go env GOPATH)/bin/actionlint"
+
+      - name: go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - run: go build ./...
+
+      # -race because the resolver cache and the registry heartbeat are concurrent
+      - run: go test -race -count=1 ./...
