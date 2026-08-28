@@ -5,7 +5,6 @@ import (
 	"strings"
 )
 
-// Header sets the header on every request going through the client.
 func Header(key, value string) RoundTripperHandler {
 	return headerHandler(key, value, false)
 }
@@ -14,9 +13,6 @@ func headerHandler(key, value string, secret bool) func(http.RoundTripper) http.
 	return func(next http.RoundTripper) http.RoundTripper {
 		fn := func(req *http.Request) (*http.Response, error) {
 			if secret && !onOriginalHost(req) {
-				// the client copies headers it doesn't recognise as credentials from the original request to every
-				// hop, so the caller's own value of such a key goes as well. For the recognised ones it copies
-				// nothing off the original host and what is there belongs to the destination, left alone
 				if !credentialHeader(key) {
 					req.Header.Del(key)
 				}
@@ -29,18 +25,14 @@ func headerHandler(key, value string, secret bool) func(http.RoundTripper) http.
 	}
 }
 
-// roundTrip passes the request down the chain and fills the request in on the response if the transport below left
-// it unset, keeping the chain onOriginalHost walks complete for any custom transport
 func roundTrip(next http.RoundTripper, req *http.Request) (*http.Response, error) {
 	resp, err := next.RoundTrip(req)
 	if resp != nil && resp.Request == nil {
 		resp.Request = req
 	}
-	return resp, err //nolint:wrapcheck // the transport's error goes through the middleware as it is
+	return resp, err //nolint:wrapcheck
 }
 
-// credentialHeader reports if the header carries credentials, the set matching the one the standard client
-// strips on a redirect to another host
 func credentialHeader(key string) bool {
 	switch http.CanonicalHeaderKey(key) {
 	case "Authorization", "Www-Authenticate", "Cookie", "Cookie2", "Proxy-Authorization", "Proxy-Authenticate":
@@ -49,21 +41,14 @@ func credentialHeader(key string) bool {
 	return false
 }
 
-// onOriginalHost reports if the request is still on the host the redirect chain started from, or on one of its
-// subdomains. A request outside of a redirect chain is always on its own host. Once the chain left the original
-// host the result stays negative for the rest of it, matching the standard client.
-//
-// The chain is walked over Response.Request, which the middleware fills in for the transport below it. A redirect
-// the origin still can't be established for is treated as a hop away from it, and so is a hop between the unicode
-// and the punycode form of the same internationalised host, which is compared as it is written.
 func onOriginalHost(req *http.Request) bool {
-	if req.Response == nil { // not a redirect
+	if req.Response == nil {
 		return true
 	}
 
 	origin := req
 	for origin.Response != nil {
-		if origin.Response.Request == nil { // broken chain, the origin is unknown
+		if origin.Response.Request == nil {
 			return false
 		}
 		origin = origin.Response.Request
@@ -78,12 +63,11 @@ func onOriginalHost(req *http.Request) bool {
 	return true
 }
 
-// domainOrSubdomain reports whether sub is the same domain as parent or a subdomain of it
 func domainOrSubdomain(sub, parent string) bool {
 	if sub == parent {
 		return true
 	}
-	if strings.ContainsAny(sub, ":%") { // IPv6 address or a zone, never a hostname
+	if strings.ContainsAny(sub, ":%") {
 		return false
 	}
 	if !strings.HasSuffix(sub, parent) {
