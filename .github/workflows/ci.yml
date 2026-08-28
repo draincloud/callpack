@@ -1,7 +1,6 @@
 name: ci
 
 on:
-  pull_request:
   push:
     # master is covered by the run that release.yml calls before it tags, so pushing
     # there does not need a second one
