@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    branches: [master]
+
+# Releases are serialised, never cancelled: two merges landing together must each get
+# their turn at the tag rather than one clobbering the other's run.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Nothing is tagged that has not passed the same lint and tests a PR does.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  tag:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # the whole tag history, to find the version to bump
+
+      - name: Work out the next version
+        id: version
+        run: |
+          set -euo pipefail
+
+          # A re-run of this workflow, or a commit tagged by hand, must not publish a
+          # second version of the same code.
+          if tag=$(git describe --exact-match --tags HEAD 2>/dev/null); then
+            echo "HEAD is already released as $tag, nothing to do"
+            exit 0
+          fi
+
+          latest=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          if [ -z "$latest" ]; then
+            next=v0.1.0
+          else
+            IFS=. read -r major minor patch <<<"${latest#v}"
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "Releasing $next (previous: ${latest:-none})"
+
+      - name: Tag and release
+        if: steps.version.outputs.next != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$NEXT" -m "$NEXT"
+          git push origin "$NEXT"
+
+          gh release create "$NEXT" --title "$NEXT" --generate-notes
