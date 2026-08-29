@@ -6,6 +6,10 @@ on:
     # there does not need a second one
     branches-ignore: [master]
   workflow_call:
+    outputs:
+      modules:
+        description: Every module directory in the repo
+        value: ${{ jobs.modules.outputs.all }}
 
 # A branch that is pushed again supersedes its own in-flight run, but master is left
 # alone: its run gates the release.
@@ -16,49 +20,97 @@ concurrency:
 permissions:
   contents: read
 
+# Each module is built and tested the way a consumer gets it - resolved from its own
+# go.mod - rather than through the workspace, which would paper over a missing require.
+env:
+  GOWORK: "off"
+
 jobs:
-  lint:
+  # Modules are discovered rather than listed, so adding one to the repo puts it under
+  # CI without touching this file.
+  modules:
     runs-on: ubuntu-latest
+    outputs:
+      all: ${{ steps.find.outputs.all }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Find the modules
+        id: find
+        run: |
+          set -euo pipefail
+
+          all=$(find . -name go.mod -not -path './.git/*' -printf '%h\n' \
+            | sed 's|^\./||' \
+            | sort \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')
+
+          echo "all=$all" >> "$GITHUB_OUTPUT"
+          echo "Modules: $all"
+
+  lint:
+    needs: modules
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.modules.outputs.all) }}
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ matrix.module }}/go.mod
 
-      - name: Tool versions
+      - name: Tool version
         id: tools
-        run: |
-          echo "golangci=$(make -s print-GOLANGCI_VERSION)" >> "$GITHUB_OUTPUT"
-          echo "actionlint=$(make -s print-ACTIONLINT_VERSION)" >> "$GITHUB_OUTPUT"
+        run: echo "golangci=$(make -s print-GOLANGCI_VERSION)" >> "$GITHUB_OUTPUT"
 
+      # the root .golangci.yml applies to every module: golangci-lint walks up for it
       - uses: golangci/golangci-lint-action@v9
         with:
           version: ${{ steps.tools.outputs.golangci }}
-
-      # the other half of `make lint`, so CI is never weaker than the local target
-      - name: Lint the workflows
-        env:
-          ACTIONLINT_VERSION: ${{ steps.tools.outputs.actionlint }}
-        run: |
-          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
-          "$(go env GOPATH)/bin/actionlint"
+          working-directory: ${{ matrix.module }}
 
       - name: go.mod and go.sum are tidy
+        working-directory: ${{ matrix.module }}
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-  test:
+  # One repo, one set of workflows - not per module.
+  workflows:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: caller/go.mod
+
+      - name: Lint the workflows
+        run: |
+          set -euo pipefail
+          go install "github.com/rhysd/actionlint/cmd/actionlint@$(make -s print-ACTIONLINT_VERSION)"
+          "$(go env GOPATH)/bin/actionlint"
+
+  test:
+    needs: modules
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.modules.outputs.all) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
 
       - run: go build ./...
+        working-directory: ${{ matrix.module }}
 
       # -race because the resolver cache and the registry heartbeat are concurrent
       - run: go test -race -count=1 ./...
+        working-directory: ${{ matrix.module }}

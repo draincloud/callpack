@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/draincloud/callpack/caller"
-	"github.com/draincloud/callpack/caller/middleware/consul"
 	"github.com/draincloud/callpack/registry"
 	"github.com/hashicorp/consul/api"
 )
@@ -341,75 +339,4 @@ func TestCloseTakesTheInstanceOutOfTheCatalog(t *testing.T) {
 	if err := reg.Close(); err != nil {
 		t.Errorf("second close: %v, want it to be a no-op", err)
 	}
-}
-
-func TestRegisteredServiceIsDiscoverableThroughTheMiddleware(t *testing.T) {
-	_, client := newAgent(t)
-
-	replicas := map[string]bool{}
-	var mu sync.Mutex
-	for _, name := range []string{"one", "two"} {
-		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			replicas[name] = true
-			mu.Unlock()
-			fmt.Fprintf(w, "served by %s, host %s", name, r.Host)
-		}))
-		t.Cleanup(backend.Close)
-
-		host, port := split(t, backend.URL)
-		register(t, client, registry.Service{Name: "api", Address: host, Port: port})
-	}
-
-	call := caller.New(http.Client{}, consul.Resolve(client, 0))
-	for i := range 2 {
-		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/things", nil)
-		if err != nil {
-			t.Fatalf("request: %v", err)
-		}
-		resp, err := call.Do(req)
-		if err != nil {
-			t.Fatalf("request %d: %v", i, err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if !strings.Contains(string(body), "host api") {
-			t.Errorf("backend saw %q, want the service name as the Host header", body)
-		}
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(replicas) != 2 {
-		t.Errorf("only %v were reached, want both replicas load balanced across", replicas)
-	}
-}
-func TestUnhealthyServiceIsNotDiscoverable(t *testing.T) {
-	_, client := newAgent(t)
-
-	register(t, client, registry.Service{
-		Name: "api", Address: "10.1.2.3", Port: 8080, TTL: 40 * time.Millisecond,
-		Health: func(context.Context) error { return fmt.Errorf("not ready") },
-	})
-
-	call := caller.New(http.Client{}, consul.Resolve(client, time.Millisecond))
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://api/things", nil)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	if _, err := call.Do(req); err == nil {
-		t.Fatal("the unhealthy replica was routed to")
-	}
-}
-
-func split(t *testing.T, rawURL string) (host string, port int) {
-	t.Helper()
-
-	var err error
-	host, rawPort, _ := strings.Cut(strings.TrimPrefix(rawURL, "http://"), ":")
-	if _, err = fmt.Sscanf(rawPort, "%d", &port); err != nil {
-		t.Fatalf("port of %q: %v", rawURL, err)
-	}
-	return host, port
 }

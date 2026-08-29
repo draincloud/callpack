@@ -5,7 +5,7 @@ on:
     branches: [master]
 
 # Releases are serialised, never cancelled: two merges landing together must each get
-# their turn at the tag rather than one clobbering the other's run.
+# their turn at the tags rather than one clobbering the other's run.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -26,43 +26,68 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0  # the whole tag history, to find the version to bump
+          fetch-depth: 0  # the whole tag history, to find each module's version to bump
 
-      - name: Work out the next version
-        id: version
-        run: |
-          set -euo pipefail
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: caller/go.mod
 
-          # A re-run of this workflow, or a commit tagged by hand, must not publish a
-          # second version of the same code.
-          if tag=$(git describe --exact-match --tags HEAD 2>/dev/null); then
-            echo "HEAD is already released as $tag, nothing to do"
-            exit 0
-          fi
-
-          latest=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
-          if [ -z "$latest" ]; then
-            next=v0.1.0
-          else
-            IFS=. read -r major minor patch <<<"${latest#v}"
-            next="v${major}.${minor}.$((patch + 1))"
-          fi
-
-          echo "next=$next" >> "$GITHUB_OUTPUT"
-          echo "Releasing $next (previous: ${latest:-none})"
-
-      - name: Tag and release
-        if: steps.version.outputs.next != ''
+      # Every module is versioned on its own, so a change to one does not drag the
+      # others through a release they have no new code for. Tags carry the module's
+      # directory as a prefix, which is how the go command resolves a nested module.
+      - name: Tag the modules whose files changed
         env:
           GH_TOKEN: ${{ github.token }}
-          NEXT: ${{ steps.version.outputs.next }}
+          MODULES: ${{ needs.ci.outputs.modules }}
         run: |
           set -euo pipefail
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git tag -a "$NEXT" -m "$NEXT"
-          git push origin "$NEXT"
+          tagged=()
+          while read -r dir; do
+            # a module that replaces another by local path cannot be consumed from
+            # outside the repo, so it is built and tested but never published
+            replaces=$(go mod edit -json "$dir/go.mod" \
+              | jq '[.Replace // [] | .[] | select(.New.Path | test("^\\.{1,2}/"))] | length')
+            if [ "$replaces" -ne 0 ]; then
+              echo "$dir: not publishable (replaces a module by local path), skipping"
+              continue
+            fi
 
-          gh release create "$NEXT" --title "$NEXT" --generate-notes
+            # A re-run of this workflow, or a tag pushed by hand, must not publish a
+            # second version of the same code.
+            existing=$(git tag --points-at HEAD --list "$dir/v*" | head -1)
+            if [ -n "$existing" ]; then
+              echo "$dir: HEAD is already released as $existing, skipping"
+              continue
+            fi
+
+            latest=$(git tag --list "$dir/v*" --sort=-v:refname \
+              | grep -E "^$dir/v[0-9]+\.[0-9]+\.[0-9]+$" | head -1 || true)
+
+            if [ -z "$latest" ]; then
+              next="$dir/v0.1.0"
+            elif git diff --quiet "$latest" HEAD -- "$dir"; then
+              echo "$dir: unchanged since $latest, skipping"
+              continue
+            else
+              IFS=. read -r major minor patch <<<"${latest#"$dir/v"}"
+              next="$dir/v${major}.${minor}.$((patch + 1))"
+            fi
+
+            echo "$dir: releasing $next (previous: ${latest:-none})"
+            git tag -a "$next" -m "$next"
+            tagged+=("$next")
+          done < <(jq -r '.[]' <<<"$MODULES")
+
+          if [ ${#tagged[@]} -eq 0 ]; then
+            echo "No module changed, nothing to release"
+            exit 0
+          fi
+
+          git push origin "${tagged[@]}"
+          for tag in "${tagged[@]}"; do
+            gh release create "$tag" --title "$tag" --generate-notes
+          done
