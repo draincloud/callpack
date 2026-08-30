@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 
+	"github.com/draincloud/logger"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -26,13 +29,25 @@ func NewApp(
 }
 
 func (a *App) Run(ctx context.Context) error {
+	ctx = logger.WithAttrs(ctx, slog.String("app", a.name))
+	logger.Warn(ctx, "[App][Run] sstarting app")
+
 	eg, egCtx := errgroup.WithContext(ctx)
+
+	runCtx, cancel := context.WithCancel(egCtx)
+	defer cancel()
 
 	for _, r := range a.runnables {
 		eg.Go(func() error {
-			return r.Run(egCtx)
+			defer cancel()
+
+			return r.Run(runCtx)
 		})
 	}
 
-	return eg.Wait()
+	if err := eg.Wait(); err != nil {
+		return fmt.Errorf("[app][Run] %s: %w", a.name, err)
+	}
+
+	return nil
 }
