@@ -5,5 +5,6 @@ use (
 	./caller
 	./closer
 	./integration
+	./postgres
 	./registry
 )
