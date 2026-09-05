@@ -3,7 +3,7 @@ module github.com/draincloud/callpack/postgres
 go 1.26.3
 
 require (
-	github.com/draincloud/logger v0.0.4
+	github.com/draincloud/logger v0.0.5
 	github.com/jackc/pgx/v5 v5.10.0
 )
 
