@@ -43,6 +43,19 @@ func (s *Storage) Backfill(ctx context.Context, data map[int64]string) error {
 }
 ```
 
+`Connect` and `ConnectDSN` take options:
+```go
+db, closeDB, err := postgres.Connect(ctx, config,
+    postgres.WithLogger(slog.Default().ErrorContext),
+    postgres.WithTracer(&tracelog.TraceLog{Logger: tracelog.LoggerFunc(logQuery)}),
+)
+```
+
+`WithLogger` redirects the background health check, which otherwise reports failures to
+the global logger. `WithTracer` takes a `pgx.QueryTracer`; pgx also uses it for the batch,
+copy, prepare, connect, acquire and release traces it implements, so `otelpgx` and
+`pgx/v5/tracelog` both go through this one option.
+
 `closeDB` shuts the pool down and stops the background health check; it matches
 `closer.CloseFunc`, so it can be handed to `closer.Add` directly.
 

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -283,12 +284,194 @@ func TestAsyncPingStopsWhenContextIsCancelled(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		(&DB{db: newLazyPool(t)}).asyncPing(ctx)
+		(&DB{db: newLazyPool(t), log: slog.New(slog.DiscardHandler)}).asyncPing(ctx)
 	}()
 
 	select {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("asyncPing outlived its context")
+	}
+}
+
+type stubTracer struct{}
+
+func (stubTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+
+func (stubTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestWithTracerReachesTheConnConfig(t *testing.T) {
+	pgconfig, err := pgxpool.ParseConfig(Config{Host: "127.0.0.1", Port: "1", Database: "app"}.dsn())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tracer := stubTracer{}
+
+	cfg := Config{}
+	WithTracer(tracer)(&cfg)
+
+	if _, closeDB, err := connect(t.Context(), pgconfig, cfg); err == nil {
+		closeDB(t.Context())
+		t.Fatal("expected the ping to fail")
+	}
+
+	if pgconfig.ConnConfig.Tracer != pgx.QueryTracer(tracer) {
+		t.Fatalf("Tracer = %#v, want the tracer the option was given", pgconfig.ConnConfig.Tracer)
+	}
+}
+
+func TestWithTracerLeavesTheConnConfigAloneWhenUnset(t *testing.T) {
+	pgconfig, err := pgxpool.ParseConfig(Config{Host: "127.0.0.1", Port: "1", Database: "app"}.dsn())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, closeDB, err := connect(t.Context(), pgconfig, Config{}); err == nil {
+		closeDB(t.Context())
+		t.Fatal("expected the ping to fail")
+	}
+
+	if pgconfig.ConnConfig.Tracer != nil {
+		t.Fatalf("Tracer = %#v, want nil", pgconfig.ConnConfig.Tracer)
+	}
+}
+
+// capturingHandler forwards each record's message to a channel, so a test can
+// assert on what the configured logger was asked to write.
+type capturingHandler struct {
+	msgs chan<- string
+}
+
+func (capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	select {
+	case h.msgs <- r.Message:
+	default:
+	}
+
+	return nil
+}
+
+func (h capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h capturingHandler) WithGroup(string) slog.Handler { return h }
+
+func TestWithLoggerReceivesHealthCheckFailures(t *testing.T) {
+	logged := make(chan string, 1)
+
+	cfg := Config{}
+	WithLogger(slog.New(capturingHandler{msgs: logged}))(&cfg)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	db := &DB{db: newLazyPool(t), log: cfg.logger}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		db.asyncPing(ctx)
+	}()
+
+	select {
+	case msg := <-logged:
+		if !strings.Contains(msg, "asyncPing") {
+			t.Fatalf("logged %q, want the health check failure", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the configured logger never saw the failed health check")
+	}
+
+	cancel()
+	<-done
+}
+
+func TestWithAfterConnectReachesThePoolConfig(t *testing.T) {
+	pgconfig, err := pgxpool.ParseConfig(Config{Host: "127.0.0.1", Port: "1", Database: "app"}.dsn())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sentinel := errors.New("sentinel")
+
+	cfg := Config{}
+	WithAfterConnect(func(context.Context, *pgx.Conn) error { return sentinel })(&cfg)
+
+	if _, closeDB, err := connect(t.Context(), pgconfig, cfg); err == nil {
+		closeDB(t.Context())
+		t.Fatal("expected the ping to fail")
+	}
+
+	if pgconfig.AfterConnect == nil {
+		t.Fatal("AfterConnect = nil, want the hook the option was given")
+	}
+
+	// Compared by what it does: func values are not comparable.
+	if err := pgconfig.AfterConnect(t.Context(), nil); !errors.Is(err, sentinel) {
+		t.Fatalf("AfterConnect returned %v, want the hook the option was given", err)
+	}
+}
+
+func TestWithAfterConnectLeavesThePoolConfigAloneWhenUnset(t *testing.T) {
+	pgconfig, err := pgxpool.ParseConfig(Config{Host: "127.0.0.1", Port: "1", Database: "app"}.dsn())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, closeDB, err := connect(t.Context(), pgconfig, Config{}); err == nil {
+		closeDB(t.Context())
+		t.Fatal("expected the ping to fail")
+	}
+
+	if pgconfig.AfterConnect != nil {
+		t.Fatal("AfterConnect is set, want nil")
+	}
+}
+
+func TestPoolLimitOptionsReachThePoolConfig(t *testing.T) {
+	pgconfig, err := pgxpool.ParseConfig(Config{Host: "127.0.0.1", Port: "1", Database: "app"}.dsn())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{}
+	for _, o := range []ConnectOpt{
+		WithMaxConns(20),
+		WithMaxConnIdleTime(5 * time.Minute),
+		WithMaxConnLifetime(30 * time.Second),
+	} {
+		o(&cfg)
+	}
+
+	if _, closeDB, err := connect(t.Context(), pgconfig, cfg); err == nil {
+		closeDB(t.Context())
+		t.Fatal("expected the ping to fail")
+	}
+
+	if pgconfig.MaxConns != 20 {
+		t.Fatalf("MaxConns = %d, want 20", pgconfig.MaxConns)
+	}
+
+	if pgconfig.MaxConnIdleTime != 5*time.Minute {
+		t.Fatalf("MaxConnIdleTime = %v, want 5m", pgconfig.MaxConnIdleTime)
+	}
+
+	if pgconfig.MaxConnLifetime != 30*time.Second {
+		t.Fatalf("MaxConnLifetime = %v, want 30s", pgconfig.MaxConnLifetime)
+	}
+}
+
+func TestInTransactionTracksTheContext(t *testing.T) {
+	if InTransaction(t.Context()) {
+		t.Fatal("InTransaction = true on a bare context")
+	}
+
+	ctx := txContext(t.Context(), nil)
+	if InTransaction(ctx) {
+		t.Fatal("InTransaction = true for a nil transaction")
 	}
 }

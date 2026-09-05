@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"time"
@@ -26,6 +27,10 @@ type Config struct {
 	MaxConns        int
 	MaxConnIdleTime time.Duration
 	MaxConnLifetime time.Duration
+
+	logger       *slog.Logger
+	tracer       pgx.QueryTracer
+	afterConnect func(context.Context, *pgx.Conn) error
 }
 
 func (c Config) dsn() string {
@@ -52,10 +57,47 @@ func (c Config) dsn() string {
 }
 
 type DB struct {
-	db *pgxpool.Pool
+	db  *pgxpool.Pool
+	log *slog.Logger
 }
 
 type ConnectOpt func(c *Config)
+
+func WithLogger(logger *slog.Logger) ConnectOpt {
+	return func(c *Config) {
+		c.logger = logger
+	}
+}
+
+func WithTracer(t pgx.QueryTracer) ConnectOpt {
+	return func(c *Config) {
+		c.tracer = t
+	}
+}
+
+func WithAfterConnect(fn func(ctx context.Context, conn *pgx.Conn) error) ConnectOpt {
+	return func(c *Config) {
+		c.afterConnect = fn
+	}
+}
+
+func WithMaxConns(n int) ConnectOpt {
+	return func(c *Config) {
+		c.MaxConns = n
+	}
+}
+
+func WithMaxConnIdleTime(d time.Duration) ConnectOpt {
+	return func(c *Config) {
+		c.MaxConnIdleTime = d
+	}
+}
+
+func WithMaxConnLifetime(d time.Duration) ConnectOpt {
+	return func(c *Config) {
+		c.MaxConnLifetime = d
+	}
+}
 
 func ConnectDSN(ctx context.Context, dsn string, opts ...ConnectOpt) (*DB, func(context.Context) error, error) {
 	pgconfig, err := pgxpool.ParseConfig(dsn)
@@ -99,6 +141,14 @@ func connect(ctx context.Context, pgconfig *pgxpool.Config, cfg Config) (*DB, fu
 		pgconfig.MaxConnLifetime = cfg.MaxConnLifetime
 	}
 
+	if cfg.tracer != nil {
+		pgconfig.ConnConfig.Tracer = cfg.tracer
+	}
+
+	if cfg.afterConnect != nil {
+		pgconfig.AfterConnect = cfg.afterConnect
+	}
+
 	pool, err := pgxpool.NewWithConfig(ctx, pgconfig)
 	if err != nil {
 		return nil, noopCloser, fmt.Errorf("failed to connect to postgres: %w", err)
@@ -112,7 +162,13 @@ func connect(ctx context.Context, pgconfig *pgxpool.Config, cfg Config) (*DB, fu
 
 	pingCtx, cancelPing := context.WithCancel(context.WithoutCancel(ctx))
 
-	d := &DB{db: pool}
+	log := cfg.logger
+	if log == nil {
+		log = logger.FromContext(ctx)
+	}
+	setupLogger(log)
+
+	d := &DB{db: pool, log: log}
 	go d.asyncPing(pingCtx)
 
 	return d, func(context.Context) error {
@@ -146,7 +202,7 @@ func (d *DB) asyncPing(ctx context.Context) {
 		func() {
 			defer t.Reset(dur)
 			if err := d.Ping(ctx); err != nil {
-				logger.Error(ctx, "DB.asyncPing error", logger.Err(err))
+				d.log.Error("DB.asyncPing error", logger.Err(err))
 			}
 		}()
 	}
@@ -199,6 +255,10 @@ func (d *DB) WithTransaction(ctx context.Context, fn func(context.Context) error
 	return fn(txContext(ctx, tx))
 }
 
+func InTransaction(ctx context.Context) bool {
+	return txFromContext(ctx) != nil
+}
+
 func Conn(ctx context.Context, db DBTX) DBTX {
 	if tx := txFromContext(ctx); tx != nil {
 		return tx
@@ -217,4 +277,8 @@ func txFromContext(ctx context.Context) pgx.Tx {
 
 func txContext(parent context.Context, tx pgx.Tx) context.Context {
 	return context.WithValue(parent, ctxKey, tx)
+}
+
+func setupLogger(log *slog.Logger) {
+	log.With(slog.String("system", "postgres.database"))
 }
