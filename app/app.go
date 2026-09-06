@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/signal"
 
 	"github.com/draincloud/logger"
 	"golang.org/x/sync/errgroup"
@@ -30,7 +32,13 @@ func NewApp(
 
 func (a *App) Run(ctx context.Context) error {
 	ctx = logger.WithAttrs(ctx, slog.String("app", a.name))
-	logger.Warn(ctx, "[App][Run] sstarting app")
+	logger.Warn(ctx, "[App][Run] starting app")
+
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, os.Kill)
+	defer cancel()
+
+	stopChan := make(chan struct{}, 1)
+	defer close(stopChan)
 
 	eg, egCtx := errgroup.WithContext(ctx)
 
