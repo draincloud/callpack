@@ -24,7 +24,7 @@ func TestRunReturnsWhenRunnableExitsCleanly(t *testing.T) {
 	})
 	oneShot := runnableFunc(func(context.Context) error { return nil })
 
-	if err := runWithin(t, time.Second, app.NewApp("test", app.StrategyOneForAll, blocked, oneShot)); err != nil {
+	if err := runWithin(t, time.Second, app.New("test", app.StrategyOneForAll, blocked, oneShot)); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 }
@@ -51,7 +51,7 @@ func TestRunReturnsWhenRunnableOneForOne(t *testing.T) {
 	defer cancel()
 
 	go func() {
-		_ = app.NewApp("test", app.StrategyOneForOne, blocked, oneShot).Run(ctx)
+		_ = app.New("test", app.StrategyOneForOne, blocked, oneShot).Run(ctx)
 	}()
 
 	select {
@@ -74,7 +74,7 @@ func TestRunWrapsRunnableError(t *testing.T) {
 	errBoom := errors.New("boom")
 	failing := runnableFunc(func(context.Context) error { return errBoom })
 
-	err := runWithin(t, time.Second, app.NewApp("test", app.StrategyOneForAll, failing))
+	err := runWithin(t, time.Second, app.New("test", app.StrategyOneForAll, failing))
 	if !errors.Is(err, errBoom) {
 		t.Fatalf("Run: got %v, want %v", err, errBoom)
 	}
@@ -99,7 +99,7 @@ func TestRunReturnsWhenRootCtxIsCanceledOneForOne(t *testing.T) {
 	m := sync.Mutex{}
 	stopped := false
 	go func() {
-		_ = app.NewApp("test", app.StrategyOneForOne, blocked).Run(ctx)
+		_ = app.New("test", app.StrategyOneForOne, blocked).Run(ctx)
 		m.Lock()
 		stopped = true
 		m.Unlock()

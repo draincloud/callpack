@@ -18,7 +18,7 @@ type Runnable interface {
 
 type App struct {
 	name      string
-	startegy  Strategy
+	strategy  Strategy
 	runnables []Runnable
 }
 
@@ -31,14 +31,14 @@ const (
 	StrategyOneForOne Strategy = "one_for_one"
 )
 
-func NewApp(
+func New(
 	name string,
 	strategy Strategy,
 	runnables ...Runnable,
 ) *App {
 	return &App{
 		name:      name,
-		startegy:  strategy,
+		strategy:  strategy,
 		runnables: runnables,
 	}
 }
@@ -63,7 +63,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	for _, r := range a.runnables {
 		eg.Go(func() error {
-			if a.startegy == StrategyOneForAll {
+			if a.strategy == StrategyOneForAll {
 				defer runCancel()
 			}
 			return r.Run(runCtx)
