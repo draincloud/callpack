@@ -6,9 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"syscall"
 
+	"github.com/draincloud/callpack/safegroup"
 	"github.com/draincloud/logger"
-	"golang.org/x/sync/errgroup"
 )
 
 type Runnable interface {
@@ -17,15 +18,27 @@ type Runnable interface {
 
 type App struct {
 	name      string
+	startegy  Strategy
 	runnables []Runnable
 }
 
+type Strategy string
+
+const (
+	// If one exits - all runnables will be killed with cancel
+	StrategyOneForAll Strategy = "one_for_all"
+	// If one exits WITHOUT error - there will be no context cancel. Error will still cause context cancellation.
+	StrategyOneForOne Strategy = "one_for_one"
+)
+
 func NewApp(
 	name string,
+	strategy Strategy,
 	runnables ...Runnable,
 ) *App {
 	return &App{
 		name:      name,
+		startegy:  strategy,
 		runnables: runnables,
 	}
 }
@@ -34,28 +47,42 @@ func (a *App) Run(ctx context.Context) error {
 	ctx = logger.WithAttrs(ctx, slog.String("app", a.name))
 	logger.Warn(ctx, "[App][Run] starting app")
 
-	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, os.Kill)
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	errChan := make(chan error, 1)
+	defer close(errChan)
 
 	stopChan := make(chan struct{}, 1)
 	defer close(stopChan)
 
-	eg, egCtx := errgroup.WithContext(ctx)
+	eg, egCtx := safegroup.WithContext(ctx)
 
-	runCtx, cancel := context.WithCancel(egCtx)
-	defer cancel()
+	runCtx, runCancel := context.WithCancel(egCtx)
+	defer runCancel()
 
 	for _, r := range a.runnables {
 		eg.Go(func() error {
-			defer cancel()
-
+			if a.startegy == StrategyOneForAll {
+				defer runCancel()
+			}
 			return r.Run(runCtx)
 		})
 	}
 
-	if err := eg.Wait(); err != nil {
-		return fmt.Errorf("[app][Run] %s: %w", a.name, err)
-	}
+	go func() {
+		defer cancel()
+		if err := eg.Wait(); err != nil {
+			errChan <- fmt.Errorf("[app][Run] %s: %w", a.name, err)
+			return
+		}
+		stopChan <- struct{}{}
+	}()
 
-	return nil
+	select {
+	case err := <-errChan:
+		return err
+	case <-stopChan:
+		return nil
+	}
 }
