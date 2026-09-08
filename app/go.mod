@@ -3,8 +3,8 @@ module github.com/draincloud/callpack/app
 go 1.26.3
 
 require (
+	github.com/draincloud/callpack/safegroup v0.1.0
 	github.com/draincloud/logger v0.0.5
-	golang.org/x/sync v0.22.0
 )
 
 require (
