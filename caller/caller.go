@@ -27,6 +27,7 @@ func (r *Caller) With(middlewares ...middleware.RoundTripperHandler) *Caller {
 	combined := make([]middleware.RoundTripperHandler, 0, len(r.mws)+len(middlewares))
 	combined = append(combined, r.mws...)
 	combined = append(combined, middlewares...)
+
 	return &Caller{client: r.client, mws: combined}
 }
 
